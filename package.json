@@ -1,0 +1,29 @@
+{
+  "name": "agentswitchboard",
+  "version": "1.0.0",
+  "description": "Zero-SDK Proxy for AI Agent Governance",
+  "private": true,
+  "workspaces": [
+    "services/proxy",
+    "services/dashboard"
+  ],
+  "scripts": {
+    "dev": "docker-compose up -d && npm run dev:proxy",
+    "dev:proxy": "npm run dev --workspace=services/proxy",
+    "dev:dashboard": "npm run dev --workspace=services/dashboard",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "lint": "eslint .",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "db:migrate": "npm run migrate --workspace=services/proxy"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

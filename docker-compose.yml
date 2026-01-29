@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # Core Proxy Service
+  # ============================================
+  
+  proxy:
+    build: ./services/proxy
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=development
+      - PORT=8080
+      - REDIS_URL=redis://redis:6379
+      - TIMESCALE_URL=postgres://switchboard:password@timescaledb:5432/traces
+      - UPSTREAM_OPENAI=https://api.openai.com
+      - UPSTREAM_ANTHROPIC=https://api.anthropic.com
+      - LOG_LEVEL=debug
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./services/proxy:/app
+      - /app/node_modules
+
+  # ============================================
+  # Mission Control Dashboard
+  # ============================================
+  
+  dashboard:
+    build: ./services/dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - VITE_API_URL=http://localhost:8080
+      - VITE_WS_URL=ws://localhost:8080/ws
+    depends_on:
+      - proxy
+    volumes:
+      - ./services/dashboard:/app
+      - /app/node_modules
+
+  # ============================================
+  # Data Infrastructure
+  # ============================================
+  
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=switchboard
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=traces
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./init-scripts/timescale:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U switchboard -d traces"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================
+  # Observability (Optional)
+  # ============================================
+  
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+    profiles:
+      - observability
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+    profiles:
+      - observability
+
+volumes:
+  redis_data:
+  timescale_data:
+
+networks:
+  default:
+    name: switchboard-network
