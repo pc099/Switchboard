@@ -93,7 +93,7 @@ export function proxyRouter(
         
         if (conflict.resolution === 'queued' && conflict.waitMs) {
           // Simple backoff - in production would use proper queueing
-          await new Promise(resolve => setTimeout(resolve, Math.min(conflict.waitMs, 5000)));
+          await new Promise(resolve => setTimeout(resolve, Math.min(conflict.waitMs ?? 0, 5000)));
         }
       }
       
@@ -158,10 +158,24 @@ async function forwardToUpstream(
   
   const url = `${upstream}${req.path}`;
   
-  // Clone headers, removing Switchboard-specific ones
+  // Clone headers, removing Switchboard-specific ones and hop-by-hop headers
   const headers: Record<string, string> = {};
+  const excludedHeaders = [
+    'x-switchboard-',
+    'host',
+    'connection',
+    'content-length',
+    'transfer-encoding',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailers',
+    'upgrade'
+  ];
+
   for (const [key, value] of Object.entries(req.headers)) {
-    if (key.startsWith('x-switchboard-') || key === 'host') continue;
+    if (excludedHeaders.some(ex => key.toLowerCase().startsWith(ex))) continue;
     if (typeof value === 'string') {
       headers[key] = value;
     }

@@ -4,7 +4,9 @@
  * Target: < 10ms latency
  */
 
-import { BloomFilter } from 'bloom-filters';
+import bloomFilters from 'bloom-filters';
+import type { BloomFilter as BloomFilterType } from 'bloom-filters';
+const { BloomFilter: BloomFilterImpl } = bloomFilters;
 import { RedisClient } from '../db/redis.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
@@ -57,7 +59,7 @@ export interface AgentRequest {
 }
 
 export class SemanticFirewall {
-  private piiBloomFilter: BloomFilter;
+  private piiBloomFilter: BloomFilterType;
   private redis: RedisClient;
   
   constructor(redis: RedisClient) {
@@ -65,7 +67,7 @@ export class SemanticFirewall {
     
     // Initialize Bloom filter with PII patterns
     // Size optimized for low false positive rate
-    this.piiBloomFilter = new BloomFilter(10000, 7);
+    this.piiBloomFilter = new BloomFilterImpl(10000, 7);
     
     // Pre-populate with common PII markers
     const piiMarkers = [
@@ -82,15 +84,16 @@ export class SemanticFirewall {
     const startTime = performance.now();
     
     try {
-      const bodyStr = typeof request.body === 'string' 
-        ? request.body 
-        : JSON.stringify(request.body);
+      const bodyStr = request.body 
+        ? (typeof request.body === 'string' ? request.body : JSON.stringify(request.body))
+        : '';
       const bodyLower = bodyStr.toLowerCase();
       
       // Stage 1: Bloom filter for PII (0.1ms)
-      if (config.firewall.blockPII && this.checkPIIProbable(bodyLower)) {
+      if (config.firewall.blockPII && bodyStr) {
         const piiMatch = this.confirmPII(bodyStr);
         if (piiMatch) {
+          logger.info({ piiMatch }, 'PII detected, blocking request');
           return this.blocked('PII detected: ' + piiMatch, 90, 'data_exfiltration', startTime);
         }
       }
@@ -146,13 +149,13 @@ export class SemanticFirewall {
   
   private confirmPII(text: string): string | null {
     for (const pattern of PII_PATTERNS) {
-      const match = text.match(pattern);
-      if (match) {
+      if (pattern.test(text)) {
         // Return sanitized indicator
-        return pattern.source.includes('email') ? 'email address' :
-               pattern.source.includes('\\d{3}-\\d{2}') ? 'SSN' :
-               pattern.source.includes('\\d{4}') ? 'potential credit card' :
-               'phone number';
+        const source = pattern.source;
+        if (source.includes('@')) return 'email address';
+        if (source.includes('\\d{3}-\\d{2}')) return 'SSN';
+        if (source.includes('\\d{4}')) return 'potential credit card';
+        return 'phone number';
       }
     }
     return null;
@@ -169,8 +172,7 @@ export class SemanticFirewall {
   
   private classifyIntent(body: any): { category: string; confidence: number; keywords: string[] } {
     // Fast keyword-based classification
-    // In production, this would use an ONNX model
-    const text = JSON.stringify(body).toLowerCase();
+    const text = body ? JSON.stringify(body).toLowerCase() : '';
     
     const categories: Record<string, { keywords: string[]; weight: number }> = {
       destructive: {
