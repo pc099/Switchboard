@@ -1,6 +1,4 @@
-# AgentSwitchboard - Zero-SDK Proxy
-
-> **Anti-Gravity**: Making agent deployment frictionless by removing the "weight" of security and cost concerns.
+# Agent Switchboard
 
 ## 🚀 Quick Start
 
