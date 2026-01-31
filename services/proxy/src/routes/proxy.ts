@@ -8,19 +8,35 @@ import { SemanticFirewall, AgentRequest } from '../firewall/index.js';
 import { FlightRecorder } from '../recorder/index.js';
 import { TrafficController } from '../traffic/index.js';
 import { WebSocketManager } from '../ws/manager.js';
+import { SemanticCache } from '../cache/semanticCache.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { workerEngine } from '../workers/engine.js';
+import { workerRegistry } from '../workers/registry.js';
+import { WorkerContext } from '../workers/engine.js';
 
 export function proxyRouter(
   firewall: SemanticFirewall,
   recorder: FlightRecorder,
   trafficController: TrafficController,
-  wsManager: WebSocketManager
+  wsManager: WebSocketManager,
+  semanticCache: SemanticCache
 ): Router {
   const router = Router();
   
   // All routes under /v1 are proxied
   router.all('/*', async (req: Request, res: Response) => {
+    // 0. Emergency Stop Check
+    if (trafficController.isEmergencyStopped()) {
+      return res.status(503).json({
+        error: {
+          message: 'System globally paused (Emergency Stop)',
+          type: 'service_unavailable',
+          code: 'EMERGENCY_STOP',
+        },
+      });
+    }
+
     const startTime = performance.now();
     const traceContext = recorder.createContext();
     
@@ -45,6 +61,34 @@ export function proxyRouter(
         path: req.path,
         method: req.method,
       };
+
+      // Step 0.5: Pre-request Workers (Edge Logic)
+      const preWorkers = workerRegistry.getWorkers('pre_request');
+      if (preWorkers.length > 0) {
+        const workerCtx: WorkerContext = {
+          request: {
+            method: agentRequest.method,
+            path: agentRequest.path,
+            headers: agentRequest.headers,
+            body: agentRequest.body
+          },
+          log: (msg) => logger.debug({ worker: 'pre' }, msg),
+          env: {}
+        };
+
+        for (const worker of preWorkers) {
+          const result = await workerEngine.execute(worker.code, workerCtx);
+          if (result.modified && result.request) {
+            agentRequest.headers = result.request.headers;
+            agentRequest.body = result.request.body;
+            req.body = result.request.body; // Update express req for downstream
+          }
+          if (result.response) {
+            // Worker generated a response (short-circuit)
+            return res.status(result.response.status).set(result.response.headers).json(result.response.body);
+          }
+        }
+      }
       
       // Step 1: Semantic Firewall evaluation
       const decision = await firewall.evaluate(agentRequest);
@@ -97,16 +141,90 @@ export function proxyRouter(
         }
       }
       
-      // Step 3: Forward to upstream provider
-      const upstreamResponse = await forwardToUpstream(req, agentRequest);
+      // Step 3: Semantic Cache lookup
+      const modelName = req.body?.model || 'gpt-3.5-turbo';
+      const promptText = extractPromptText(req.body);
+      let cacheHit = false;
+      let cachedResponse: any = null;
+
+      if (promptText) {
+        const cached = await semanticCache.lookup(agentRequest.orgId, modelName, promptText);
+        if (cached) {
+          cacheHit = true;
+          cachedResponse = JSON.parse(cached.responseText);
+          
+          // Estimate cost saved (based on typical token pricing)
+          const estimatedCost = 0.002; // ~$0.002 per cached response
+          await semanticCache.recordHit(cached.cacheId, estimatedCost);
+          
+          logger.info({ 
+            agentId: agentRequest.agentId, 
+            similarity: cached.similarity.toFixed(3) 
+          }, 'Semantic cache hit');
+        }
+      }
+
+      // Step 4: Forward to upstream (or use cached response)
+      let upstreamResponse: { status: number; body: any };
       
-      // Step 4: Record trace
-      const modelName = req.body?.model;
-      const usage = upstreamResponse.body?.usage;
+      if (cacheHit && cachedResponse) {
+        upstreamResponse = { status: 200, body: cachedResponse };
+      } else {
+        upstreamResponse = await forwardToUpstream(req, agentRequest);
+        
+        // Store successful responses in cache
+        if (upstreamResponse.status === 200 && promptText) {
+          const usage = upstreamResponse.body?.usage;
+          semanticCache.store(
+            agentRequest.orgId,
+            modelName,
+            promptText,
+            JSON.stringify(upstreamResponse.body),
+            usage?.total_tokens
+          ).catch(err => logger.warn({ err }, 'Failed to cache response'));
+        }
+
+        }
+
+      // Step 4.5: Post-response Workers
+      let finalResponse = upstreamResponse;
+      const postWorkers = workerRegistry.getWorkers('post_response');
+      
+      if (postWorkers.length > 0) {
+        const workerCtx: WorkerContext = {
+          request: {
+            method: agentRequest.method,
+            path: agentRequest.path,
+            headers: agentRequest.headers,
+            body: agentRequest.body
+          },
+          response: {
+            status: upstreamResponse.status,
+            body: upstreamResponse.body,
+            headers: {}
+          },
+          log: (msg) => logger.debug({ worker: 'post' }, msg),
+          env: {}
+        };
+
+        for (const worker of postWorkers) {
+          const result = await workerEngine.execute(worker.code, workerCtx);
+          if (result.modified && result.response) {
+            finalResponse = {
+              status: result.response.status,
+              body: result.response.body
+            };
+          }
+        }
+      }
+
+      
+      // Step 5: Record trace
+      const usage = finalResponse.body?.usage;
       
       await recorder.record(traceContext, {
         request: agentRequest,
-        response: upstreamResponse.body,
+        response: finalResponse.body,
         decision,
         modelProvider: getProvider(req.headers),
         modelName,
@@ -130,10 +248,11 @@ export function proxyRouter(
         'X-Switchboard-Trace-Id': traceContext.traceId,
         'X-Switchboard-Latency-Ms': String(Math.round(performance.now() - startTime)),
         'X-Switchboard-Risk-Score': String(decision.riskScore),
+        'X-Switchboard-Cache': cacheHit ? 'HIT' : 'MISS',
       });
       
       // Return upstream response
-      res.status(upstreamResponse.status).json(upstreamResponse.body);
+      res.status(finalResponse.status).json(finalResponse.body);
       
     } catch (err) {
       logger.error({ err, path: req.path }, 'Proxy error');
@@ -202,4 +321,34 @@ function getProvider(headers: Request['headers']): string {
   if (auth.includes('sk-ant-')) return 'anthropic';
   if (auth.includes('AIza')) return 'google';
   return 'openai';
+}
+
+/**
+ * Extract the prompt text from a request body for cache key generation
+ */
+function extractPromptText(body: any): string | null {
+  if (!body) return null;
+  
+  try {
+    // OpenAI chat completion format
+    if (body.messages && Array.isArray(body.messages)) {
+      return body.messages
+        .map((m: any) => `${m.role}:${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
+        .join('|');
+    }
+    
+    // OpenAI legacy completion format
+    if (body.prompt) {
+      return typeof body.prompt === 'string' ? body.prompt : JSON.stringify(body.prompt);
+    }
+    
+    // Anthropic format
+    if (body.human_prompt || body.prompt) {
+      return body.human_prompt || body.prompt;
+    }
+    
+    return null;
+  } catch {
+    return null;
+  }
 }

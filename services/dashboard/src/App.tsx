@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 // Types
@@ -37,8 +37,14 @@ interface BurnRateData {
   history: { minute: string; cost: number }[];
 }
 
+interface ShadowSavings {
+  shadowBlockedCount: number;
+  totalMitigatedCost: number;
+  periodHours: number;
+}
+
 const API_URL = '/api';
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const ORG_ID = 'org_demo';
 
 export default function App() {
@@ -48,22 +54,33 @@ export default function App() {
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [globalPaused, setGlobalPaused] = useState(false);
+  const [emergencyStopped, setEmergencyStopped] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
+  const [shadowSavings, setShadowSavings] = useState<ShadowSavings>({ shadowBlockedCount: 0, totalMitigatedCost: 0, periodHours: 24 });
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'governance'>('dashboard');
+  const [shadowMode, setShadowMode] = useState(false);
 
   // Fetch initial data
   const fetchData = useCallback(async () => {
     try {
-      const [burnRes, agentsRes, anomaliesRes, tracesRes] = await Promise.all([
+      const [burnRes, agentsRes, anomaliesRes, tracesRes, shadowRes, policyRes] = await Promise.all([
         fetch(`${API_URL}/burn-rate/${ORG_ID}`),
         fetch(`${API_URL}/agents/${ORG_ID}`),
         fetch(`${API_URL}/anomalies/${ORG_ID}`),
         fetch(`${API_URL}/traces/${ORG_ID}?limit=20`),
+        fetch(`${API_URL}/shadow-savings/${ORG_ID}`),
+        fetch(`${API_URL}/policies/current`),
       ]);
 
       if (burnRes.ok) setBurnRate(await burnRes.json());
       if (agentsRes.ok) setAgents(await agentsRes.json());
       if (anomaliesRes.ok) setAnomalies(await anomaliesRes.json());
       if (tracesRes.ok) setTraces(await tracesRes.json());
+      if (shadowRes.ok) setShadowSavings(await shadowRes.json());
+      if (policyRes.ok) {
+        const policy = await policyRes.json();
+        setShadowMode(policy.shadow_mode);
+      }
     } catch (err) {
       console.error('Failed to fetch data:', err);
     }
@@ -101,6 +118,23 @@ export default function App() {
             break;
           case 'global_pause_status':
             setGlobalPaused(data.payload.paused);
+            break;
+          case 'emergency_stop':
+            setEmergencyStopped(data.payload.stopped);
+            break;
+          case 'new_trace':
+            // Handle new trace event - update shadow savings if shadow event
+            if (data.payload.isShadowEvent) {
+              setShadowSavings(prev => ({
+                ...prev,
+                shadowBlockedCount: prev.shadowBlockedCount + 1,
+                totalMitigatedCost: prev.totalMitigatedCost + (data.payload.cost || 0),
+              }));
+            }
+            fetchData(); // Refresh traces
+            break;
+          case 'policy_updated':
+            setShadowMode(data.payload.shadow_mode);
             break;
         }
       };
@@ -164,9 +198,45 @@ export default function App() {
     setAnomalies(prev => prev.filter(a => a.anomaly_id !== anomalyId));
   };
 
+  const handleEmergencyStop = async () => {
+    if (!confirm('⚠️ EMERGENCY STOP: This will reject ALL requests with 503. Are you absolutely sure?')) return;
+    
+    await fetch(`${API_URL}/control/emergency-stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    setEmergencyStopped(true);
+  };
+
+  const handleEmergencyReset = async () => {
+    await fetch(`${API_URL}/control/emergency-reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    setEmergencyStopped(false);
+  };
+
+  const handlePolicyUpdate = async (updates: any) => {
+    // Optimistic update
+    if (updates.shadow_mode !== undefined) setShadowMode(updates.shadow_mode);
+
+    try {
+      await fetch(`${API_URL}/policies`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+    } catch (err) {
+      console.error('Failed to update policy:', err);
+      // Revert on failure would go here
+      fetchData();
+    }
+  };
+
   // Computed values
   const activeAgents = agents.filter(a => a.status === 'active').length;
   const blockedToday = traces.filter(t => t.action_taken === 'blocked').length;
+  const shadowBlockedToday = traces.filter((t: Trace) => t.action_taken === 'shadow_blocked').length;
   const avgLatency = 6.2; // Would come from metrics
 
   return (
@@ -178,56 +248,91 @@ export default function App() {
           AgentSwitchboard
         </div>
         
+        {/* Tab Navigation */}
+        <div className="nav-tabs">
+          <button 
+            className={`nav-tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}
+          >
+            📊 Dashboard
+          </button>
+          <button 
+            className={`nav-tab ${activeTab === 'governance' ? 'active' : ''}`}
+            onClick={() => setActiveTab('governance')}
+          >
+            ⚙️ Governance
+          </button>
+        </div>
+        
         <div className="kill-switch">
           <span className={`status-badge ${wsConnected ? 'connected' : 'disconnected'}`}>
             {wsConnected ? '● Connected' : '○ Disconnected'}
           </span>
           
-          {globalPaused ? (
+          {emergencyStopped ? (
+            <button className="btn btn-warning btn-lg emergency-active" onClick={handleEmergencyReset}>
+              🔴 EMERGENCY ACTIVE - Click to Reset
+            </button>
+          ) : globalPaused ? (
             <button className="btn btn-primary btn-lg" onClick={handleResumeAll}>
               ▶ Resume All Agents
             </button>
           ) : (
-            <button className="btn btn-danger btn-lg kill-switch-btn" onClick={handlePauseAll}>
-              ⏸ PAUSE ALL AGENTS
-            </button>
+            <>
+              <button className="btn btn-danger btn-lg kill-switch-btn" onClick={handlePauseAll}>
+                ⏸ PAUSE ALL
+              </button>
+              <button className="btn btn-danger-critical btn-lg" onClick={handleEmergencyStop}>
+                🛑 EMERGENCY STOP
+              </button>
+            </>
           )}
         </div>
       </header>
 
       <main className="main">
-        {/* Metrics Grid */}
-        <div className="metrics-grid">
-          <MetricCard
-            title="Burn Rate"
-            value={`$${burnRate.currentRate.toFixed(2)}`}
-            subtitle="per minute"
-            trend={burnRate.currentRate > 1 ? 'up' : 'stable'}
-            trendValue={`$${burnRate.hourlyProjection.toFixed(2)}/hr projected`}
-            color={burnRate.currentRate > 5 ? 'danger' : burnRate.currentRate > 2 ? 'warning' : 'success'}
-          />
+        {activeTab === 'dashboard' ? (
+          <>
+            {/* Metrics Grid */}
+            <div className="metrics-grid">
+              <MetricCard
+                title="Burn Rate"
+                value={`$${burnRate.currentRate.toFixed(2)}`}
+                subtitle="per minute"
+                trend={burnRate.currentRate > 1 ? 'up' : 'stable'}
+                trendValue={`$${burnRate.hourlyProjection.toFixed(2)}/hr projected`}
+                color={burnRate.currentRate > 5 ? 'danger' : burnRate.currentRate > 2 ? 'warning' : 'success'}
+              />
+              
+              <MetricCard
+                title="Active Agents"
+                value={String(activeAgents)}
+                subtitle={`of ${agents.length} total`}
+                color="success"
+              />
+              
+              {/* Shadow Savings Widget */}
+              <MetricCard
+                title="🛡️ Shadow Savings"
+                value={`$${shadowSavings.totalMitigatedCost.toFixed(2)}`}
+                subtitle={`${shadowSavings.shadowBlockedCount} risks caught (${shadowSavings.periodHours}h)`}
+                color="success"
+              />
           
-          <MetricCard
-            title="Active Agents"
-            value={String(activeAgents)}
-            subtitle={`of ${agents.length} total`}
-            color="success"
-          />
-          
-          <MetricCard
-            title="Blocked Today"
-            value={String(blockedToday)}
-            subtitle="requests blocked"
-            color={blockedToday > 10 ? 'warning' : 'success'}
-          />
-          
-          <MetricCard
-            title="Avg Latency"
-            value={`${avgLatency}ms`}
-            subtitle="firewall overhead"
-            color={avgLatency < 10 ? 'success' : 'warning'}
-          />
-        </div>
+              <MetricCard
+                title="Blocked Today"
+                value={String(blockedToday)}
+                subtitle="requests blocked"
+                color={blockedToday > 10 ? 'warning' : 'success'}
+              />
+              
+              <MetricCard
+                title="Avg Latency"
+                value={`${avgLatency}ms`}
+                subtitle="firewall overhead"
+                color={avgLatency < 10 ? 'success' : 'warning'}
+              />
+            </div>
 
         <div className="content-grid">
           {/* Left column */}
@@ -384,6 +489,75 @@ export default function App() {
             ))}
           </div>
         </div>
+          </>
+        ) : (
+          /* Governance Tab */
+          <div className="governance-panel">
+            <div className="card">
+              <div className="card-header">
+                <span className="card-title">Policy Governance</span>
+              </div>
+              <div className="governance-controls">
+                <div className="control-row">
+                  <div className="control-label">
+                    <strong>🛡️ Shadow Mode</strong>
+                    <span className="control-desc">Log violations without blocking requests</span>
+                  </div>
+                  <label className="toggle">
+                    <input 
+                      type="checkbox" 
+                      checked={shadowMode} 
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => handlePolicyUpdate({ shadow_mode: e.target.checked })}
+                    />
+                    <span className="toggle-slider"></span>
+                  </label>
+                </div>
+                
+                <div className="control-row">
+                  <div className="control-label">
+                    <strong>🔒 Block PII</strong>
+                    <span className="control-desc">Detect and block requests containing PII</span>
+                  </div>
+                  <label className="toggle">
+                    <input type="checkbox" defaultChecked={true} />
+                    <span className="toggle-slider"></span>
+                  </label>
+                </div>
+                
+                <div className="control-row">
+                  <div className="control-label">
+                    <strong>⚠️ Block Destructive Patterns</strong>
+                    <span className="control-desc">Block dangerous commands like DROP, DELETE, etc.</span>
+                  </div>
+                  <label className="toggle">
+                    <input type="checkbox" defaultChecked={true} />
+                    <span className="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            
+            <div className="card" style={{ marginTop: 'var(--space-xl)' }}>
+              <div className="card-header">
+                <span className="card-title">Shadow Mode Statistics</span>
+              </div>
+              <div className="stats-grid">
+                <div className="stat">
+                  <div className="stat-value">{shadowSavings.shadowBlockedCount}</div>
+                  <div className="stat-label">Risks Caught</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-value">${shadowSavings.totalMitigatedCost.toFixed(2)}</div>
+                  <div className="stat-label">Potential Savings</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-value">{shadowBlockedToday}</div>
+                  <div className="stat-label">Shadow Blocked Today</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

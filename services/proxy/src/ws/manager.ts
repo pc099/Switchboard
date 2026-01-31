@@ -12,7 +12,11 @@ export type EventType =
   | 'anomaly_detected'
   | 'trace_event'
   | 'global_pause_status'
-  | 'agent_blocked';
+  | 'agent_blocked'
+  | 'new_trace'
+  | 'emergency_stop'
+  | 'policy_updated'
+  | 'waf_rule_updated';
 
 export interface WSEvent {
   type: EventType;
@@ -150,6 +154,36 @@ export class WebSocketManager {
       payload: { agentId, reason },
       timestamp: new Date().toISOString(),
     }, orgId);
+  }
+  
+  /**
+   * Broadcast new trace event (for real-time dashboard updates)
+   */
+  broadcastNewTrace(data: {
+    traceId: string;
+    orgId: string;
+    agentId: string;
+    cost?: number;
+    intent?: string;
+    status: string;
+    isShadowEvent?: boolean;
+  }): void {
+    this.broadcast({
+      type: 'new_trace',
+      payload: data,
+      timestamp: new Date().toISOString(),
+    }, data.orgId);
+  }
+  
+  /**
+   * Broadcast emergency stop status
+   */
+  broadcastEmergencyStop(stopped: boolean): void {
+    this.broadcast({
+      type: 'emergency_stop',
+      payload: { stopped },
+      timestamp: new Date().toISOString(),
+    });
   }
   
   private send(ws: WebSocket, event: WSEvent): void {

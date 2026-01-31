@@ -10,6 +10,8 @@ const { BloomFilter: BloomFilterImpl } = bloomFilters;
 import { RedisClient } from '../db/redis.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
+import { PolicyLoader } from './policyLoader.js';
+import { semanticWAF } from './semanticWAF.js';
 
 // Pre-compiled dangerous patterns
 const DANGEROUS_PATTERNS = [
@@ -42,11 +44,13 @@ const PII_PATTERNS = [
 
 export interface FirewallDecision {
   allowed: boolean;
-  action: 'allowed' | 'blocked' | 'audited' | 'modified';
+  action: 'allowed' | 'blocked' | 'audited' | 'modified' | 'shadow_blocked';
   reason?: string;
   riskScore: number;
   intentCategory?: string;
   latencyMs: number;
+  isShadowEvent?: boolean;
+  policyId?: string;
 }
 
 export interface AgentRequest {
@@ -61,9 +65,11 @@ export interface AgentRequest {
 export class SemanticFirewall {
   private piiBloomFilter: BloomFilterType;
   private redis: RedisClient;
+  private policyLoader?: PolicyLoader;
   
-  constructor(redis: RedisClient) {
+  constructor(redis: RedisClient, policyLoader?: PolicyLoader) {
     this.redis = redis;
+    this.policyLoader = policyLoader;
     
     // Initialize Bloom filter with PII patterns
     // Size optimized for low false positive rate
@@ -77,7 +83,21 @@ export class SemanticFirewall {
     ];
     piiMarkers.forEach(marker => this.piiBloomFilter.add(marker.toLowerCase()));
     
-    logger.info('Semantic Firewall initialized');
+    logger.info({ shadowMode: this.isShadowMode() }, 'Semantic Firewall initialized');
+  }
+  
+  /**
+   * Check if shadow mode is active
+   */
+  private isShadowMode(): boolean {
+    return this.policyLoader?.isShadowMode() ?? config.shadowMode;
+  }
+  
+  /**
+   * Get current policy ID for tracing
+   */
+  private getPolicyId(): string {
+    return this.policyLoader?.getPolicyId() ?? 'default';
   }
   
   async evaluate(request: AgentRequest): Promise<FirewallDecision> {
@@ -104,6 +124,18 @@ export class SemanticFirewall {
         if (dangerMatch) {
           return this.blocked('Dangerous pattern: ' + dangerMatch, 95, 'destructive', startTime);
         }
+      }
+      
+      // Stage 2.5: Semantic WAF evaluation (1-3ms)
+      const wafResult = semanticWAF.evaluate(bodyStr);
+      if (wafResult.blocked) {
+        const topRule = wafResult.details[0];
+        return this.blocked(
+          `WAF ${topRule?.ruleId}: ${topRule?.ruleName}`,
+          wafResult.riskScore * 100,
+          topRule?.ruleId.toLowerCase() || 'waf_violation',
+          startTime
+        );
       }
       
       // Stage 3: Content-based intent classification (3-5ms)
@@ -273,6 +305,24 @@ export class SemanticFirewall {
     category: string,
     startTime: number
   ): FirewallDecision {
+    const isShadowMode = this.isShadowMode();
+    const policyId = this.getPolicyId();
+    
+    if (isShadowMode) {
+      // In shadow mode: log the violation but allow the request
+      logger.info({ reason, category, policyId }, 'Shadow mode: would have blocked request');
+      return {
+        allowed: true,  // Allow in shadow mode
+        action: 'shadow_blocked',
+        reason,
+        riskScore,
+        intentCategory: category,
+        latencyMs: performance.now() - startTime,
+        isShadowEvent: true,
+        policyId,
+      };
+    }
+    
     return {
       allowed: false,
       action: 'blocked',
@@ -280,6 +330,8 @@ export class SemanticFirewall {
       riskScore,
       intentCategory: category,
       latencyMs: performance.now() - startTime,
+      isShadowEvent: false,
+      policyId,
     };
   }
 }

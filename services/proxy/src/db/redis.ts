@@ -32,6 +32,15 @@ export class RedisClient {
     await this.client.quit();
   }
   
+  // Generic get/set for cache
+  async get(key: string): Promise<string | null> {
+    return this.client.get(key);
+  }
+  
+  async setEx(key: string, ttl: number, value: string): Promise<void> {
+    await this.client.setex(key, ttl, value);
+  }
+  
   // Token/policy cache operations
   async getOrg(token: string): Promise<any | null> {
     const data = await this.client.get(`org:token:${token}`);

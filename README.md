@@ -34,53 +34,65 @@ response = client.chat.completions.create(
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Your AI Agents                           │
-│         (Python, TypeScript, Mojo - any framework)          │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 AgentSwitchboard Proxy                       │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │  Semantic   │  │   Traffic   │  │   Flight Recorder   │  │
-│  │  Firewall   │  │  Controller │  │     (Traces)        │  │
-│  │  (< 10ms)   │  │  (Locking)  │  │                     │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│               Upstream AI Providers                          │
-│         (OpenAI, Anthropic, Google, Azure)                  │
-└─────────────────────────────────────────────────────────────┘
+## Architecture
+
+```mermaid
+flowchart TB
+    Agent[Agent Request] --> W1[Worker: Pre-Request]
+    W1 --> WAF{Semantic WAF}
+    WAF --Blocked--> Block[Block/Shadow Log]
+    WAF --Allowed--> Cache{Semantic Cache}
+    
+    Cache --Hit--> Return[Return Cached]
+    Cache --Miss--> Traffic{Traffic Controller}
+    
+    Traffic --> LLM[Upstream LLM]
+    LLM --> W2[Worker: Post-Response]
+    W2 --> Recorder[Flight Recorder]
+    
+    Recorder -.-> Radar[Agentic Radar]
+    Recorder --> Client[Return Response]
 ```
 
 ## Features
 
-### 🛡️ Semantic Firewall
-- Real-time intent classification (< 10ms latency)
-- PII detection via Bloom filters
-- Dangerous pattern blocking (SQL injection, shell commands)
-- Customizable policies per organization
+### 🧠 Semantic CDN (New!)
+- **Vector Caching**: Caches reasoning results using `pgvector` similarity search.
+- **Zero-Latency**: Serves repeated queries in <20ms, saving money and time.
+- **Local Embeddings**: Runs `all-MiniLM-L6-v2` locally (no external API costs).
+
+### 🛡️ Semantic WAF & Firewall
+- **WAF Rules**:
+  - `WAF-101`: Prompt Injection detection
+  - `WAF-102`: Tool Hijacking prevention
+  - `WAF-103`: PII Exfiltration auto-redaction
+- **Shadow Mode**: Test rules in production without blocking.
+- **Fail-Open Design**: Ensures reliability even under load.
+
+### 👷 Agent Workers (Edge Logic)
+- **Programmable Proxy**: Inject custom JavaScript/TypeScript middleware.
+- **Sandboxed Execution**: Runs untrusted code safely via Node.js `vm`.
+- **Use Cases**: Custom PII masking, header injection, response transformation.
+
+### 📡 Agentic Radar (Observability)
+- **Anomaly Detection**: Real-time Z-Score analysis of token usage.
+- **Fleet Health**: Detects runaway agents and hallucination spikes.
+- **Live Alerts**: WebSocket broadcasts for critical anomalies.
 
 ### ✈️ Flight Recorder
 - Full request/response logging
 - Reasoning chain capture
-- Tool call tracking
-- Cost calculation
+- Cost calculation & burn rate tracking
 
 ### 🚦 Traffic Controller
 - Multi-agent conflict resolution
+- **Global Emergency Stop** (Kill Switch)
 - Distributed locking via Redis
-- Priority-based queuing
 
 ### 📊 Mission Control Dashboard
-- Real-time burn rate monitoring
-- Agent fleet management
-- Anomaly detection
-- Global kill switch
+- Real-time metrics & anomaly visualization
+- Policy governance & rule toggles
+- Cache hit rate & savings monitor
 
 ## Services
 
@@ -124,12 +136,16 @@ npm test
 - `GET /v1/models`
 
 ### Internal API
+### Internal API
 - `GET /api/burn-rate/:orgId`
 - `GET /api/agents/:orgId`
 - `GET /api/traces/:orgId`
+- `GET /api/cache-stats/:orgId` (New)
+- `GET /api/waf/rules` (New)
+- `PUT /api/waf/rules/:id` (New)
+- `GET /api/radar/anomalies/:orgId` (New)
 - `POST /api/control/pause-all`
 - `POST /api/control/pause-agent`
-- `POST /api/control/revoke-token`
 
 ## License
 

@@ -34,6 +34,11 @@ export class PostgresClient {
     await this.pool.end();
   }
   
+  // Generic query method for custom SQL
+  async query(sql: string, params?: any[]): Promise<any> {
+    return this.pool.query(sql, params);
+  }
+  
   // Organization operations
   async getOrgByToken(token: string): Promise<any | null> {
     const result = await this.pool.query(
@@ -128,6 +133,7 @@ export class PostgresClient {
     clientIp?: string;
     userAgent?: string;
     durationMs?: number;
+    isShadowEvent?: boolean;
   }): Promise<void> {
     await this.pool.query(
       `INSERT INTO agent_traces (
@@ -135,10 +141,10 @@ export class PostgresClient {
         request_type, intent_category, risk_score, model_provider, model_name,
         input_tokens, output_tokens, cost_usd, request_body, response_body,
         reasoning_steps, tool_calls, policy_applied, action_taken, block_reason,
-        client_ip, user_agent, duration_ms
+        client_ip, user_agent, duration_ms, is_shadow_event
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
       )`,
       [
         trace.traceId,
@@ -166,6 +172,7 @@ export class PostgresClient {
         trace.clientIp,
         trace.userAgent,
         trace.durationMs,
+        trace.isShadowEvent ?? false,
       ]
     );
   }
@@ -244,4 +251,35 @@ export class PostgresClient {
       [anomalyId, resolvedBy]
     );
   }
+  
+  // Shadow mode analytics
+  async getShadowBlockedTraces(orgId: string, hours = 24): Promise<any[]> {
+    const result = await this.pool.query(
+      `SELECT * FROM agent_traces 
+       WHERE org_id = $1 
+         AND is_shadow_event = true
+         AND timestamp > NOW() - INTERVAL '${hours} hours'
+       ORDER BY timestamp DESC`,
+      [orgId]
+    );
+    return result.rows;
+  }
+  
+  async getShadowSavings(orgId: string, hours = 24): Promise<{ count: number; totalCost: number }> {
+    const result = await this.pool.query(
+      `SELECT 
+         COUNT(*) as count,
+         COALESCE(SUM(cost_usd), 0) as total_cost
+       FROM agent_traces 
+       WHERE org_id = $1 
+         AND is_shadow_event = true
+         AND timestamp > NOW() - INTERVAL '${hours} hours'`,
+      [orgId]
+    );
+    return {
+      count: parseInt(result.rows[0]?.count || '0'),
+      totalCost: parseFloat(result.rows[0]?.total_cost || '0'),
+    };
+  }
 }
+

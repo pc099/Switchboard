@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "policy_id": "default-v1",
+  "max_burn_rate_per_hour": 100,
+  "blocked_intents": [
+    "destructive",
+    "code_execution",
+    "data_exfiltration"
+  ],
+  "pii_masking_enabled": true,
+  "shadow_mode": true,
+  "rules": {
+    "block_pii": true,
+    "block_destructive": true,
+    "block_external_calls": false,
+    "allowed_models": [
+      "gpt-3.5-turbo",
+      "gpt-4",
+      "gpt-4-turbo",
+      "claude-3-sonnet",
+      "claude-3-haiku"
+    ],
+    "max_tokens_per_request": 10000
+  }
+}

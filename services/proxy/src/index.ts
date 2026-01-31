@@ -14,11 +14,15 @@ import { logger } from './utils/logger.js';
 import { proxyRouter } from './routes/proxy.js';
 import { apiRouter } from './routes/api.js';
 import { SemanticFirewall } from './firewall/index.js';
+import { PolicyLoader } from './firewall/policyLoader.js';
 import { FlightRecorder } from './recorder/index.js';
 import { TrafficController } from './traffic/index.js';
 import { RedisClient } from './db/redis.js';
 import { PostgresClient } from './db/postgres.js';
 import { WebSocketManager } from './ws/manager.js';
+import { SemanticCache } from './cache/semanticCache.js';
+import { initializeEmbeddings } from './cache/embeddings.js';
+import { RadarDetector } from './radar/detector.js';
 
 async function main() {
   // Initialize services
@@ -31,10 +35,19 @@ async function main() {
   await redis.connect();
   await postgres.connect();
   
+  // Policy loader
+  const policyLoader = new PolicyLoader(redis);
+  await policyLoader.initialize();
+  
+  // Initialize embedding model for semantic cache (may take 2-5s on first load)
+  logger.info('Initializing embedding model...');
+  await initializeEmbeddings();
+  
   // Core services
-  const firewall = new SemanticFirewall(redis);
+  const firewall = new SemanticFirewall(redis, policyLoader);
   const recorder = new FlightRecorder(postgres);
   const trafficController = new TrafficController(redis);
+  const semanticCache = new SemanticCache(postgres, redis);
   
   // Express app
   const app = express();
@@ -43,6 +56,10 @@ async function main() {
   // WebSocket for real-time dashboard
   const wss = new WebSocketServer({ server, path: '/ws' });
   const wsManager = new WebSocketManager(wss);
+
+  // Agentic Radar
+  const radar = new RadarDetector(postgres, wsManager);
+  radar.start();
   
   // Middleware
   app.use(helmet({ contentSecurityPolicy: false }));
@@ -56,10 +73,10 @@ async function main() {
   });
   
   // Internal API routes
-  app.use('/api', apiRouter(postgres, redis, wsManager));
+  app.use('/api', apiRouter(postgres, redis, wsManager, trafficController, policyLoader));
   
   // Proxy routes (matches OpenAI/Anthropic API structure)
-  app.use('/v1', proxyRouter(firewall, recorder, trafficController, wsManager));
+  app.use('/v1', proxyRouter(firewall, recorder, trafficController, wsManager, semanticCache));
   
   // Error handler
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

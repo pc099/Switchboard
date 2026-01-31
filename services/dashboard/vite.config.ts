@@ -7,11 +7,11 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: `http://${process.env.PROXY_HOST || 'localhost'}:8080`,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8080',
+        target: `ws://${process.env.PROXY_HOST || 'localhost'}:8080`,
         ws: true,
       },
     },

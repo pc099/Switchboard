@@ -38,6 +38,23 @@ export class TrafficController {
     
     logger.info('Traffic Controller initialized');
   }
+
+  // Emergency Stop Controls
+  private emergencyStopped = false;
+
+  triggerEmergencyStop(): void {
+    this.emergencyStopped = true;
+    logger.warn('TRAFFIC CONTROLLER: Emergency stop triggered');
+  }
+
+  resetEmergencyStop(): void {
+    this.emergencyStopped = false;
+    logger.info('TRAFFIC CONTROLLER: Emergency stop reset');
+  }
+
+  isEmergencyStopped(): boolean {
+    return this.emergencyStopped;
+  }
   
   /**
    * Attempt to acquire access to a resource

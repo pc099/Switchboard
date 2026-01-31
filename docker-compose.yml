@@ -17,6 +17,11 @@ services:
       - UPSTREAM_OPENAI=https://api.openai.com
       - UPSTREAM_ANTHROPIC=https://api.anthropic.com
       - LOG_LEVEL=debug
+      # Shadow Mode & Governance
+      - SHADOW_MODE=true
+      - POLICIES_CONFIG_PATH=/app/config/policies.json
+      - EMERGENCY_STOP_ENABLED=false
+      - MOCK_UPSTREAM=true
     depends_on:
       redis:
         condition: service_healthy
@@ -30,6 +35,7 @@ services:
     volumes:
       - ./services/proxy:/app
       - /app/node_modules
+      - ./config/policies.json:/app/config/policies.json
 
   # ============================================
   # Mission Control Dashboard
@@ -43,6 +49,7 @@ services:
       - NODE_ENV=development
       - VITE_API_URL=http://localhost:8080
       - VITE_WS_URL=ws://localhost:8080/ws
+      - PROXY_HOST=proxy
     depends_on:
       - proxy
     volumes:

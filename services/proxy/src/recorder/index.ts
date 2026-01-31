@@ -28,6 +28,8 @@ export interface TraceData {
   toolCalls?: any[];
   clientIp?: string;
   userAgent?: string;
+  isShadowEvent?: boolean;
+  policyId?: string;
 }
 
 // Token pricing (approximate)
@@ -66,10 +68,34 @@ export class FlightRecorder {
   async record(context: TraceContext, data: TraceData): Promise<void> {
     const duration = Math.round(performance.now() - context.startTime);
     
+    // Auto-register agent
+    try {
+      await this.postgres.upsertAgent({
+        agentId: data.request.agentId,
+        orgId: data.request.orgId,
+        name: data.request.headers['x-agent-name'] || data.request.agentId,
+        framework: data.request.headers['x-agent-framework'],
+      });
+    } catch (err) {
+      // Ignore registration errors (prevent blocking flow)
+      logger.warn({ agentId: data.request.agentId, err }, 'Failed to auto-register agent');
+    }
+
+    // Estimate tokens if missing (crucial for shadow savings calculation)
+    if (!data.inputTokens && data.request.body?.messages) {
+      try {
+        const text = JSON.stringify(data.request.body.messages);
+        data.inputTokens = Math.ceil(text.length / 4); // Crude estimation
+        data.outputTokens = 0; // No output for blocked/failed requests
+      } catch {
+        data.inputTokens = 0;
+      }
+    }
+
     // Calculate cost if token info available
     let costUsd = data.costUsd;
-    if (!costUsd && data.inputTokens && data.outputTokens && data.modelName) {
-      costUsd = this.calculateCost(data.modelName, data.inputTokens, data.outputTokens);
+    if (!costUsd && data.inputTokens !== undefined && data.modelName) {
+      costUsd = this.calculateCost(data.modelName, data.inputTokens, data.outputTokens || 0);
     }
     
     // Extract reasoning steps and tool calls from response
@@ -95,21 +121,26 @@ export class FlightRecorder {
       responseBody: data.response,
       reasoningSteps: data.reasoningSteps || reasoningSteps,
       toolCalls: data.toolCalls || toolCalls,
-      policyApplied: undefined,
+      policyApplied: data.policyId || data.decision.policyId,
       actionTaken: data.decision.action,
       blockReason: data.decision.reason,
       clientIp: data.clientIp,
       userAgent: data.userAgent,
       durationMs: duration,
+      isShadowEvent: data.isShadowEvent || data.decision.isShadowEvent || false,
     };
     
     // Add to buffer for batch insert
     this.buffer.push({ ...data, response: trace });
     
-    // Immediate insert for blocked actions
-    if (data.decision.action === 'blocked') {
+    // Immediate insert for blocked and shadow_blocked actions
+    if (data.decision.action === 'blocked' || data.decision.action === 'shadow_blocked') {
       await this.postgres.recordTrace(trace);
-      logger.warn({ agentId: data.request.agentId, reason: data.decision.reason }, 'Request blocked');
+      if (data.decision.action === 'blocked') {
+        logger.warn({ agentId: data.request.agentId, reason: data.decision.reason }, 'Request blocked');
+      } else {
+        logger.info({ agentId: data.request.agentId, reason: data.decision.reason }, 'Shadow blocked (allowed in shadow mode)');
+      }
     }
   }
   
